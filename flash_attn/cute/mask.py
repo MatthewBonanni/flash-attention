@@ -400,7 +400,14 @@ class AttentionMask:
         r2p = True
         if const_expr(not mask_causal and not mask_local and mask_mod is None):
             if const_expr(mask_seqlen):
-                if const_expr(not r2p):
+                if const_expr(self.swap_AB):
+                    # Swapped: KV positions are along TMEM rows (MMA M dimension).
+                    # Each thread's KV position is the first coordinate (same for all fragment elements).
+                    kv_pos = tScS_t2r[0][0]
+                    if kv_pos >= seqlenk_col_limit:
+                        for i in cutlass.range(cute.size(tScS_t2r.shape), unroll_full=True):
+                            acc_S[i] = -Float32.inf
+                elif const_expr(not r2p):
                     for i in cutlass.range(cute.size(tScS_t2r.shape), unroll_full=True):
                         # if tScS_t2r[i][1] >= seqlenk_col_limit:
                         #     acc_S[i] = -Float32.inf
@@ -465,66 +472,96 @@ class AttentionMask:
 
         else:  # Causal or local
             causal_row_offset = self.seqlen_k - n_block * self.tile_n - self.seqlen_q
-            row_idx = tScS_t2r[0][0] + m_block * self.tile_m
-            if const_expr(self.qhead_per_kvhead_packgqa != 1):
-                row_idx = row_idx // self.qhead_per_kvhead_packgqa
-            if const_expr(mask_causal):
-                col_limit_right = row_idx + causal_row_offset + 1
-                if const_expr(mask_seqlen):
-                    col_limit_right = cutlass.min(col_limit_right, seqlenk_col_limit)
-                # if cute.arch.thread_idx()[0] % 32 == 0:
-                #     cute.printf("tidx = %d, tidx tmem = %d, row_idx = %d, col_limit_right = %d, causal_row_offset = %d\n", cute.arch.thread_idx()[0], thr_tmem_load.thr_idx, row_idx, col_limit_right, causal_row_offset)
+            if const_expr(self.swap_AB):
+                # Swapped: identity coords are (K_in_tile, Q_in_tile).
+                # Q positions vary per element so we mask element-by-element.
                 ncol = const_expr(cute.size(tScS_t2r.shape))
-                if const_expr(not r2p):
-                    for i in cutlass.range(ncol, unroll_full=True):
-                        acc_S[i] = -Float32.inf if tScS_t2r[i][1] >= col_limit_right else acc_S[i]
-                else:
-                    mask_r2p_lambda(
-                        acc_S,
-                        lambda s: r2p_bitmask_below(col_limit_right, s),
-                        rank1=True,
-                    )
-            else:
-                local_row_offset_right = (
-                    causal_row_offset + 1 + self.window_size_right
-                    if const_expr(self.window_size_right is not None)
-                    else None
-                )
-                local_row_offset_left = (
-                    causal_row_offset - self.window_size_left
-                    if const_expr(self.window_size_left is not None)
-                    else None
-                )
-                if const_expr(self.window_size_right is not None):
-                    col_limit_right = row_idx + local_row_offset_right
-                else:
-                    col_limit_right = self.tile_n
-                if const_expr(mask_seqlen):
-                    col_limit_right = cutlass.min(col_limit_right, seqlenk_col_limit)
-                col_limit_left = (
-                    row_idx + local_row_offset_left
-                    if const_expr(self.window_size_left is not None)
-                    else 0
-                )
-                if const_expr(not r2p):
-                    # if cute.arch.thread_idx()[0] == 0 or cute.arch.thread_idx()[0] == 128: cute.printf("m_block = {}, n_block = {}, row_idx = {}, causal_row_offset = {}, col_limit_right = {}, col_limit_left = {}", m_block, n_block, row_idx, causal_row_offset, col_limit_right, col_limit_left)
-                    for i in cutlass.range(cute.size(tScS_t2r.shape), unroll_full=True):
-                        col_idx = tScS_t2r[i][1]
+                for i in cutlass.range(ncol, unroll_full=True):
+                    k_in_tile = tScS_t2r[i][0]
+                    q_idx = tScS_t2r[i][1] + m_block * self.tile_m
+                    if const_expr(self.qhead_per_kvhead_packgqa != 1):
+                        q_idx = q_idx // self.qhead_per_kvhead_packgqa
+                    if const_expr(mask_causal):
+                        limit = q_idx + causal_row_offset + 1
+                        if const_expr(mask_seqlen):
+                            limit = cutlass.min(limit, seqlenk_col_limit)
+                        acc_S[i] = -Float32.inf if k_in_tile >= limit else acc_S[i]
+                    else:
+                        right = (
+                            q_idx + causal_row_offset + 1 + self.window_size_right
+                            if const_expr(self.window_size_right is not None)
+                            else self.tile_n
+                        )
+                        if const_expr(mask_seqlen):
+                            right = cutlass.min(right, seqlenk_col_limit)
+                        left = (
+                            q_idx + causal_row_offset - self.window_size_left
+                            if const_expr(self.window_size_left is not None)
+                            else 0
+                        )
                         acc_S[i] = (
                             -Float32.inf
-                            if col_idx >= col_limit_right or col_idx < col_limit_left
+                            if k_in_tile >= right or k_in_tile < left
                             else acc_S[i]
                         )
-                else:
-                    # Dual-bound R2P masking for SM100.
-                    # Masks elements where: NOT (col_limit_left <= col < col_limit_right)
-
-                    def mask_gen_fn(s: int) -> Uint32:
-                        return r2p_bitmask_below(col_limit_right, s) & r2p_bitmask_above(
-                            col_limit_left, s
+            else:
+                row_idx = tScS_t2r[0][0] + m_block * self.tile_m
+                if const_expr(self.qhead_per_kvhead_packgqa != 1):
+                    row_idx = row_idx // self.qhead_per_kvhead_packgqa
+                if const_expr(mask_causal):
+                    col_limit_right = row_idx + causal_row_offset + 1
+                    if const_expr(mask_seqlen):
+                        col_limit_right = cutlass.min(col_limit_right, seqlenk_col_limit)
+                    ncol = const_expr(cute.size(tScS_t2r.shape))
+                    if const_expr(not r2p):
+                        for i in cutlass.range(ncol, unroll_full=True):
+                            acc_S[i] = -Float32.inf if tScS_t2r[i][1] >= col_limit_right else acc_S[i]
+                    else:
+                        mask_r2p_lambda(
+                            acc_S,
+                            lambda s: r2p_bitmask_below(col_limit_right, s),
+                            rank1=True,
                         )
+                else:
+                    local_row_offset_right = (
+                        causal_row_offset + 1 + self.window_size_right
+                        if const_expr(self.window_size_right is not None)
+                        else None
+                    )
+                    local_row_offset_left = (
+                        causal_row_offset - self.window_size_left
+                        if const_expr(self.window_size_left is not None)
+                        else None
+                    )
+                    if const_expr(self.window_size_right is not None):
+                        col_limit_right = row_idx + local_row_offset_right
+                    else:
+                        col_limit_right = self.tile_n
+                    if const_expr(mask_seqlen):
+                        col_limit_right = cutlass.min(col_limit_right, seqlenk_col_limit)
+                    col_limit_left = (
+                        row_idx + local_row_offset_left
+                        if const_expr(self.window_size_left is not None)
+                        else 0
+                    )
+                    if const_expr(not r2p):
+                        for i in cutlass.range(cute.size(tScS_t2r.shape), unroll_full=True):
+                            col_idx = tScS_t2r[i][1]
+                            acc_S[i] = (
+                                -Float32.inf
+                                if col_idx >= col_limit_right or col_idx < col_limit_left
+                                else acc_S[i]
+                            )
+                    else:
+                        # Dual-bound R2P masking for SM100.
+                        # Masks elements where: NOT (col_limit_left <= col < col_limit_right)
 
-                    mask_r2p_lambda(acc_S, mask_gen_fn, rank1=True)
+                        def mask_gen_fn(s: int) -> Uint32:
+                            return r2p_bitmask_below(col_limit_right, s) & r2p_bitmask_above(
+                                col_limit_left, s
+                            )
+
+                        mask_r2p_lambda(acc_S, mask_gen_fn, rank1=True)
 
     @cute.jit
     def apply_mask_sm100_transposed(

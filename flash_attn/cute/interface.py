@@ -546,6 +546,30 @@ def _flash_attn_fwd(
         and (tile_m % qhead_per_kvhead == 0 or not pack_gqa)
     )
 
+    # Enable swap_mma_ab for decode-like workloads on SM100+ where the M tile is underutilized.
+    # With m_block_size=64, UMMA M minimum is 64 but effective M may be much smaller.
+    # Swapping A/B maps the small M to UMMA N (min 8), eliminating wasted rows.
+    head_dim_v_padded = int(math.ceil(head_dim_v / 16) * 16)
+    swap_mma_ab = (
+        arch // 10 in [10, 11]
+        and seqlen_q_packgqa <= 8
+        and not is_split_kv
+        and not use_2cta_instrs
+        and head_dim_v_padded in (64, 128)
+        and score_mod is None
+        and mask_mod is None
+        and not use_block_sparsity
+        and learnable_sink is None
+        and cu_seqlens_q is None
+    )
+    if swap_mma_ab:
+        tile_m = int(math.ceil(seqlen_q_packgqa / 8) * 8)
+        tile_m = max(tile_m, 8)
+        q_stage = 1
+        m_block_size_effective = tile_m
+        num_m_blocks = (seqlen_q_packgqa + m_block_size_effective - 1) // m_block_size_effective
+        total_mblocks = batch_size * num_head_kv * num_m_blocks
+
     # hash score and mask mods for compile cache
     score_mod_hash = utils.hash_callable(score_mod) if score_mod is not None else False
     mask_mod_hash = utils.hash_callable(mask_mod) if mask_mod is not None else False
@@ -639,6 +663,7 @@ def _flash_attn_fwd(
         intra_wg_overlap,
         requested_use_clc_scheduler,
         fa_logging.get_fa_log_level(),
+        swap_mma_ab,
     )
     if compile_key not in _flash_attn_fwd.compile_cache:
         (
@@ -745,6 +770,7 @@ def _flash_attn_fwd(
                 q_subtile_factor=q_subtile_factor,
                 use_2cta_instrs=use_2cta_instrs,
                 use_clc_scheduler=requested_use_clc_scheduler,
+                swap_mma_ab=swap_mma_ab,
             )
         elif arch // 10 == 12:
             # SM120 (Blackwell GeForce / DGX Spark): uses SM80 MMA with SM120 SMEM capacity

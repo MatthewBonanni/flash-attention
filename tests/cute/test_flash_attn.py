@@ -1347,9 +1347,7 @@ def test_flash_attn_kvcache(
                 # lse_ref = torch.logsumexp(qk / math.sqrt(d), -1)
                 # probs = torch.softmax(qk, dim=-1)
                 print(f"Output max diff: {(out - out_ref).abs().max().item()}")
-                print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
                 print(f"Pytorch max diff: {(out_pt - out_ref).abs().max().item()}")
-                print(f"Pytorch mean diff: {(out_pt - out_ref).abs().mean().item()}")
                 # breakpoint()
 
                 # Check that FlashAttention's numerical error is at most twice the numerical error
