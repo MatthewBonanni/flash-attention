@@ -183,10 +183,6 @@ class BlackwellFusedMultiHeadAttentionForward:
         stream: cuda.CUstream = None,
     ):
         # Keep parity with FlashAttentionForwardSm100.__call__ interface.
-        # (TODO@wangsiyu) Implement these features.
-        assert mSeqUsedQ is None and mSeqUsedK is None, (
-            "SM100 forward with head_dim=256 does not support seqused_q/seqused_k"
-        )
         assert learnable_sink is None, (
             "SM100 forward with head_dim=256 does not support learnable_sink"
         )
@@ -208,6 +204,8 @@ class BlackwellFusedMultiHeadAttentionForward:
         lse_tensor = mLSE
         cum_seqlen_q = mCuSeqlensQ
         cum_seqlen_k = mCuSeqlensK
+        seqused_q = mSeqUsedQ
+        seqused_k = mSeqUsedK
 
         q_rank = len(mQ.shape)
         k_rank = len(mK.shape)
@@ -262,6 +260,10 @@ class BlackwellFusedMultiHeadAttentionForward:
             b = mCuSeqlensQ.shape[0] - 1
         elif cutlass.const_expr(cum_seqlen_k is not None):
             b = mCuSeqlensK.shape[0] - 1
+        elif cutlass.const_expr(seqused_q is not None):
+            b = seqused_q.shape[0]
+        elif cutlass.const_expr(seqused_k is not None):
+            b = seqused_k.shape[0]
         else:
             b = mQ.shape[0]
 
@@ -527,6 +529,8 @@ class BlackwellFusedMultiHeadAttentionForward:
             o,
             cum_seqlen_q,
             cum_seqlen_k,
+            seqused_q,
+            seqused_k,
             lse,
             scale_softmax_log2,
             scale_softmax,
@@ -564,6 +568,8 @@ class BlackwellFusedMultiHeadAttentionForward:
         mO_qdl: cute.Tensor,
         cum_seqlen_q: Optional[cute.Tensor],
         cum_seqlen_k: Optional[cute.Tensor],
+        seqused_q: Optional[cute.Tensor],
+        seqused_k: Optional[cute.Tensor],
         mLSE: Optional[cute.Tensor],
         scale_softmax_log2: Float32,
         scale_softmax: Float32,
@@ -834,6 +840,11 @@ class BlackwellFusedMultiHeadAttentionForward:
                         Int32(0),
                         ((Int32(0), Int32(0)), Int32(0)),
                     )
+                if cutlass.const_expr(seqused_q is not None):
+                    seqlen_q = seqused_q[batch_coord]
+                if cutlass.const_expr(seqused_k is not None):
+                    seqlen_k = seqused_k[batch_coord]
+                if cutlass.const_expr(cum_seqlen_q is not None or seqused_q is not None):
                     continue_cond = not FmhaStaticTileScheduler.check_valid_work_for_seqlen_q(
                         self.qk_mma_tiler[0],
                         mma_block_coord[0],
@@ -1046,6 +1057,9 @@ class BlackwellFusedMultiHeadAttentionForward:
                 if cutlass.const_expr(cum_seqlen_q is not None):
                     cuseqlen_q = cum_seqlen_q[batch_coord]
                     seqlen_q = cum_seqlen_q[batch_coord + 1] - cuseqlen_q
+                if cutlass.const_expr(seqused_q is not None):
+                    seqlen_q = seqused_q[batch_coord]
+                if cutlass.const_expr(cum_seqlen_q is not None or seqused_q is not None):
                     continue_cond = not FmhaStaticTileScheduler.check_valid_work_for_seqlen_q(
                         self.qk_mma_tiler[0],
                         mma_block_coord[0],
@@ -1056,6 +1070,8 @@ class BlackwellFusedMultiHeadAttentionForward:
                     if cutlass.const_expr(cum_seqlen_k is not None):
                         cuseqlen_k = cum_seqlen_k[batch_coord]
                         seqlen_k = cum_seqlen_k[batch_coord + 1] - cuseqlen_k
+                    if cutlass.const_expr(seqused_k is not None):
+                        seqlen_k = seqused_k[batch_coord]
 
                     seqlen_kv_loop_start, seqlen_kv_loop_steps = (
                         FusedMask.get_trip_start_count_via_block_info(
@@ -1298,6 +1314,9 @@ class BlackwellFusedMultiHeadAttentionForward:
                 if cutlass.const_expr(cum_seqlen_q is not None):
                     cuseqlen_q = cum_seqlen_q[batch_coord]
                     seqlen_q = cum_seqlen_q[batch_coord + 1] - cuseqlen_q
+                if cutlass.const_expr(seqused_q is not None):
+                    seqlen_q = seqused_q[batch_coord]
+                if cutlass.const_expr(cum_seqlen_q is not None or seqused_q is not None):
                     continue_cond = not FmhaStaticTileScheduler.check_valid_work_for_seqlen_q(
                         self.qk_mma_tiler[0],
                         mma_block_coord[0],
@@ -1307,6 +1326,8 @@ class BlackwellFusedMultiHeadAttentionForward:
                     if cutlass.const_expr(cum_seqlen_k is not None):
                         cuseqlen_k = cum_seqlen_k[batch_coord]
                         seqlen_k = cum_seqlen_k[batch_coord + 1] - cuseqlen_k
+                    if cutlass.const_expr(seqused_k is not None):
+                        seqlen_k = seqused_k[batch_coord]
 
                     row_max = -Float32.inf
                     row_max_prev = -Float32.inf
@@ -1412,6 +1433,9 @@ class BlackwellFusedMultiHeadAttentionForward:
                 if cutlass.const_expr(cum_seqlen_q is not None):
                     cuseqlen_q = cum_seqlen_q[batch_coord]
                     seqlen_q = cum_seqlen_q[batch_coord + 1] - cuseqlen_q
+                if cutlass.const_expr(seqused_q is not None):
+                    seqlen_q = seqused_q[batch_coord]
+                if cutlass.const_expr(cum_seqlen_q is not None or seqused_q is not None):
                     continue_cond = not FmhaStaticTileScheduler.check_valid_work_for_seqlen_q(
                         self.qk_mma_tiler[0],
                         mma_block_coord[0],
@@ -1422,6 +1446,8 @@ class BlackwellFusedMultiHeadAttentionForward:
                     if cutlass.const_expr(cum_seqlen_k is not None):
                         cuseqlen_k = cum_seqlen_k[batch_coord]
                         seqlen_k = cum_seqlen_k[batch_coord + 1] - cuseqlen_k
+                    if cutlass.const_expr(seqused_k is not None):
+                        seqlen_k = seqused_k[batch_coord]
 
                     mO_qdl_eff = mO_qdl
                     if cutlass.const_expr(cum_seqlen_q is not None):
