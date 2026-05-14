@@ -318,7 +318,7 @@ class BlackwellFusedMultiHeadAttentionForward:
             v = cute.make_tensor(v_tensor.iterator, v_paged_layout)
             page_table_layout = cute.make_layout(
                 (b, mPageTable.shape[1]),
-                stride=(Int64(mPageTable.shape[1]), 1),
+                stride=(Int64(mPageTable.stride[0]), 1),
             )
             page_table = cute.make_tensor(mPageTable.iterator, page_table_layout)
         else:
