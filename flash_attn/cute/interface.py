@@ -869,6 +869,9 @@ def _flash_attn_fwd(
                         )
                     # pack_gqa is an auto-selected optimization; disable it for hd256 kernel
                     pack_gqa = False
+                    # hd256 2CTA kernel uses tile_n=128 internally, not the
+                    # config-derived tile_n which may differ for head_dim_v>128
+                    tile_n = 128
 
                 flash_fwd_obj_cls = (
                     BlackwellFusedMultiHeadAttentionForward
