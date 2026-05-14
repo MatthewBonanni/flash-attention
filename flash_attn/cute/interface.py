@@ -858,16 +858,13 @@ def _flash_attn_fwd(
                     assert learnable_sink is None, \
                         "SM100 forward with head_dim=256 does not support learnable_sink"
                     if page_table is not None:
-                        assert max_seqlen_k % page_size == 0, (
-                            f"SM100 hd256 2CTA paged KV requires max_seqlen_k divisible by "
-                            f"page_size ({page_size}), got max_seqlen_k={max_seqlen_k}"
-                        )
-                        num_pages_needed = max_seqlen_k // page_size
+                        num_pages_needed = (max_seqlen_k + page_size - 1) // page_size
+                        max_seqlen_k = num_pages_needed * page_size
                         if page_table.shape[1] > num_pages_needed:
                             page_table = page_table[:, :num_pages_needed]
-                        assert page_table.shape[1] == num_pages_needed, (
+                        assert page_table.shape[1] >= num_pages_needed, (
                             f"SM100 hd256 2CTA paged KV requires page_table.shape[1] >= "
-                            f"max_seqlen_k // page_size ({num_pages_needed}), "
+                            f"ceil(max_seqlen_k / page_size) ({num_pages_needed}), "
                             f"got {page_table.shape[1]}"
                         )
                     # pack_gqa is an auto-selected optimization; disable it for hd256 kernel
